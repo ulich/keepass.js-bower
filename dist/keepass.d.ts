@@ -20,9 +20,9 @@ declare var pako: any, Salsa20: any, Case: any;
 declare module Keepass {
     class Database {
         private headerParser;
+        private masterKeyUtil;
         streamKey: any;
-        private getKey(h, masterPassword, fileKey);
-        getPasswords(buf: any, masterPassword: any, keyFile: any): Promise<any>;
+        getPasswords(buf: any, masterPassword: any, keyFile?: any): any;
         private decryptStreamKey(protectedStreamKey);
         /**
          * Returns the decrypted data from a protected element of a KDBX entry
@@ -38,9 +38,36 @@ declare module Keepass {
     }
 }
 declare module Keepass {
+    /**
+    * Parses a KeePass key file
+    */
+    class KeyFileParser {
+        getKeyFromFile(arr: any): any;
+    }
+}
+declare module Keepass {
+    /**
+     * Utility for inferring the master key from the master password and
+     * additionally from a keyfile
+     */
+    class MasterKeyUtil {
+        private keyFileParser;
+        inferMasterKey(h: any, masterPassword: any, keyFile?: any): any;
+        private infer(h, masterPassword, fileKey?);
+    }
+}
+declare module Keepass {
     class Util {
         static littleEndian: boolean;
         static convertArrayToUUID(arr: any): string;
+        /**
+         * Converts the given ArrayBuffer to a binary string
+         */
+        static ab2str(arr: any): String;
+        /**
+         * Converts the given binaryString to an ArrayBuffer
+         */
         static str2ab(binaryString: String): ArrayBuffer;
+        static hex2arr(hex: string): any[];
     }
 }

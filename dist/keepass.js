@@ -263,39 +263,10 @@ var Keepass;
     var Database = (function () {
         function Database() {
             this.headerParser = new Keepass.HeaderParser();
+            this.masterKeyUtil = new Keepass.MasterKeyUtil();
         }
-        Database.prototype.getKey = function (h, masterPassword, fileKey) {
-            var partPromises = [];
-            var SHA = {
-                name: "SHA-256"
-            };
-            if (masterPassword || !fileKey) {
-                var encoder = new TextEncoder();
-                var masterKey = encoder.encode(masterPassword);
-                var p = window.crypto.subtle.digest(SHA, new Uint8Array(masterKey));
-                partPromises.push(p);
-            }
-            if (fileKey) {
-                partPromises.push(Promise.resolve(fileKey));
-            }
-            return Promise.all(partPromises).then(function (parts) {
-                if (h.kdbx || partPromises.length > 1) {
-                    //kdbx, or kdb with fileKey + masterPassword, do the SHA a second time
-                    var compositeKeySource = new Uint8Array(32 * parts.length);
-                    for (var i = 0; i < parts.length; i++) {
-                        compositeKeySource.set(new Uint8Array(parts[i]), i * 32);
-                    }
-                    return window.crypto.subtle.digest(SHA, compositeKeySource);
-                }
-                else {
-                    //kdb with just only fileKey or masterPassword (don't do a second SHA digest in this scenario)
-                    return partPromises[0];
-                }
-            });
-        };
         Database.prototype.getPasswords = function (buf, masterPassword, keyFile) {
             var _this = this;
-            var fileKey = keyFile ? atob(keyFile) : null;
             var h = this.headerParser.readHeader(buf);
             if (!h)
                 throw new Error('Failed to read file header');
@@ -310,8 +281,7 @@ var Keepass;
                 name: "AES-CBC",
                 iv: h.iv
             };
-            var compositeKeyPromise = this.getKey(h, masterPassword, fileKey);
-            return compositeKeyPromise.then(function (masterKey) {
+            return this.masterKeyUtil.inferMasterKey(h, masterPassword, keyFile).then(function (masterKey) {
                 //transform master key thousands of times
                 return _this.aes_ecb_encrypt(h.transformSeed, masterKey, h.keyRounds);
             }).then(function (finalVal) {
@@ -530,6 +500,107 @@ var Keepass;
     })();
     Keepass.Database = Database;
 })(Keepass || (Keepass = {}));
+/// <reference path="../typings/tsd.d.ts" />
+var Keepass;
+(function (Keepass) {
+    /**
+    * Parses a KeePass key file
+    */
+    var KeyFileParser = (function () {
+        function KeyFileParser() {
+        }
+        KeyFileParser.prototype.getKeyFromFile = function (arr) {
+            if (arr.byteLength == 0) {
+                return Promise.reject(new Error('key file has zero bytes'));
+            }
+            else if (arr.byteLength == 32) {
+                //file content is the key
+                return Promise.resolve(arr);
+            }
+            else if (arr.byteLength == 64) {
+                //file content may be a hex string of the key
+                var decoder = new TextDecoder();
+                var hexString = decoder.decode(arr);
+                var newArr = Keepass.Util.hex2arr(hexString);
+                if (newArr.length == 32) {
+                    return Promise.resolve(newArr);
+                }
+            }
+            //attempt to parse xml
+            try {
+                var decoder = new TextDecoder();
+                var xml = decoder.decode(arr);
+                var parser = new DOMParser();
+                var doc = parser.parseFromString(xml, "text/xml");
+                var keyNode = doc.evaluate('//KeyFile/Key/Data', doc, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null);
+                if (keyNode.singleNodeValue && keyNode.singleNodeValue.textContent) {
+                    return Promise.resolve(Keepass.Util.str2ab(atob(keyNode.singleNodeValue.textContent)));
+                }
+            }
+            catch (err) {
+            }
+            // finally just create a sha256 hash from the file contents
+            return window.crypto.subtle.digest({ name: "SHA-256" }, arr);
+        };
+        return KeyFileParser;
+    })();
+    Keepass.KeyFileParser = KeyFileParser;
+})(Keepass || (Keepass = {}));
+/// <reference path="../typings/tsd.d.ts" />
+var Keepass;
+(function (Keepass) {
+    /**
+     * Utility for inferring the master key from the master password and
+     * additionally from a keyfile
+     */
+    var MasterKeyUtil = (function () {
+        function MasterKeyUtil() {
+            this.keyFileParser = new Keepass.KeyFileParser();
+        }
+        MasterKeyUtil.prototype.inferMasterKey = function (h, masterPassword, keyFile) {
+            var _this = this;
+            if (keyFile) {
+                return this.keyFileParser.getKeyFromFile(keyFile).then(function (key) {
+                    return _this.infer(h, masterPassword, key);
+                });
+            }
+            else {
+                return this.infer(h, masterPassword);
+            }
+        };
+        MasterKeyUtil.prototype.infer = function (h, masterPassword, fileKey) {
+            var partPromises = [];
+            var SHA = {
+                name: "SHA-256"
+            };
+            if (masterPassword || !fileKey) {
+                var encoder = new TextEncoder();
+                var masterKey = encoder.encode(masterPassword);
+                var p = window.crypto.subtle.digest(SHA, new Uint8Array(masterKey));
+                partPromises.push(p);
+            }
+            if (fileKey) {
+                partPromises.push(Promise.resolve(fileKey));
+            }
+            return Promise.all(partPromises).then(function (parts) {
+                if (h.kdbx || partPromises.length > 1) {
+                    //kdbx, or kdb with fileKey + masterPassword, do the SHA a second time
+                    var compositeKeySource = new Uint8Array(32 * parts.length);
+                    for (var i = 0; i < parts.length; i++) {
+                        compositeKeySource.set(new Uint8Array(parts[i]), i * 32);
+                    }
+                    return window.crypto.subtle.digest(SHA, compositeKeySource);
+                }
+                else {
+                    //kdb with just only fileKey or masterPassword (don't do a second SHA digest in this scenario)
+                    return partPromises[0];
+                }
+            });
+        };
+        return MasterKeyUtil;
+    })();
+    Keepass.MasterKeyUtil = MasterKeyUtil;
+})(Keepass || (Keepass = {}));
 var Keepass;
 (function (Keepass) {
     var Util = (function () {
@@ -543,6 +614,20 @@ var Keepass;
             }
             return result.join("");
         };
+        /**
+         * Converts the given ArrayBuffer to a binary string
+         */
+        Util.ab2str = function (arr) {
+            var binary = '';
+            var bytes = new Uint8Array(arr);
+            for (var i = 0; i < bytes.byteLength; i++) {
+                binary += String.fromCharCode(bytes[i]);
+            }
+            return binary;
+        };
+        /**
+         * Converts the given binaryString to an ArrayBuffer
+         */
         Util.str2ab = function (binaryString) {
             var len = binaryString.length;
             var bytes = new Uint8Array(len);
@@ -550,6 +635,15 @@ var Keepass;
                 bytes[i] = binaryString.charCodeAt(i);
             }
             return bytes.buffer;
+        };
+        Util.hex2arr = function (hex) {
+            if (hex.length % 2 != 0 || !/^[0-9A-Fa-f]+$/.test(hex)) {
+                return [];
+            }
+            var arr = [];
+            for (var i = 0; i < hex.length; i += 2)
+                arr.push(parseInt(hex.substr(i, 2), 16));
+            return arr;
         };
         Util.littleEndian = (function () {
             var buffer = new ArrayBuffer(2);
